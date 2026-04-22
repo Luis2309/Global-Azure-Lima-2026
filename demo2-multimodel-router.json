@@ -1,0 +1,650 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string"
+              },
+              "task_type": {
+                "type": "string",
+                "description": "analysis | code | document | simple | auto"
+              },
+              "system_context": {
+                "type": "string"
+              },
+              "user_id": {
+                "type": "string"
+              },
+              "preferred_model": {
+                "type": "string",
+                "description": "gpt4o | claude | gemini — override manual"
+              }
+            },
+            "required": [
+              "prompt"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Init_Selected_Model": {
+        "runAfter": {},
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "selected_model",
+              "type": "string",
+              "value": "none"
+            }
+          ]
+        }
+      },
+      "Init_Cost": {
+        "runAfter": {
+          "Init_Selected_Model": [
+            "Succeeded"
+          ]
+        },
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "estimated_cost_usd",
+              "type": "float",
+              "value": 0
+            }
+          ]
+        }
+      },
+      "Content_Safety_PreCheck": {
+        "runAfter": {
+          "Init_Cost": [
+            "Succeeded"
+          ]
+        },
+        "type": "Http",
+        "inputs": {
+          "uri": "@{parameters('ContentSafetyEndpoint')}/contentsafety/text:analyze?api-version=2023-10-01",
+          "method": "POST",
+          "headers": {
+            "Ocp-Apim-Subscription-Key": "@parameters('ContentSafetyKey')",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@{triggerBody()?['prompt']}",
+            "categories": [
+              "Hate",
+              "SelfHarm",
+              "Sexual",
+              "Violence"
+            ],
+            "outputType": "FourSeverityLevels"
+          }
+        },
+        "description": "DEMO STEP 1: Safety gate — todo prompt pasa aqui sin excepcion"
+      },
+      "Parse_Safety_Result": {
+        "runAfter": {
+          "Content_Safety_PreCheck": [
+            "Succeeded"
+          ]
+        },
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@body('Content_Safety_PreCheck')",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "categoriesAnalysis": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Get_Max_Severity": {
+        "runAfter": {
+          "Parse_Safety_Result": [
+            "Succeeded"
+          ]
+        },
+        "type": "Compose",
+        "inputs": "@max(body('Parse_Safety_Result')?['categoriesAnalysis'][0]?['severity'], body('Parse_Safety_Result')?['categoriesAnalysis'][1]?['severity'], body('Parse_Safety_Result')?['categoriesAnalysis'][2]?['severity'], body('Parse_Safety_Result')?['categoriesAnalysis'][3]?['severity'])"
+      },
+      "Safety_Gate": {
+        "runAfter": {
+          "Get_Max_Severity": [
+            "Succeeded"
+          ]
+        },
+        "type": "If",
+        "expression": {
+          "and": [
+            {
+              "greaterOrEquals": [
+                "@outputs('Get_Max_Severity')",
+                4
+              ]
+            }
+          ]
+        },
+        "description": "DEMO: Branch principal — severity >= 4 bloquea",
+        "actions": {
+          "Log_Blocked": {
+            "runAfter": {},
+            "type": "Compose",
+            "inputs": {
+              "blocked": true,
+              "severity": "@outputs('Get_Max_Severity')",
+              "user_id": "@{coalesce(triggerBody()?['user_id'], 'anonymous')}",
+              "timestamp": "@utcNow()",
+              "categories": "@body('Parse_Safety_Result')?['categoriesAnalysis']"
+            }
+          },
+          "Email_Security_Alert": {
+            "runAfter": {
+              "Log_Blocked": [
+                "Succeeded"
+              ]
+            },
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['outlook']['connectionId']"
+                }
+              },
+              "method": "post",
+              "body": {
+                "To": "YOUR_SECURITY_EMAIL@domain.com",
+                "Subject": "[DEMO2 AI-GOVERNANCE] Prompt bloqueado severity @{outputs('Get_Max_Severity')}",
+                "Body": "<p><strong>Demo 2 — Multi-Model Router</strong></p><p><strong>Severity:</strong> @{outputs('Get_Max_Severity')}/6</p><p><strong>Usuario:</strong> @{coalesce(triggerBody()?['user_id'], 'anonymous')}</p><p><strong>Timestamp:</strong> @{utcNow()}</p>",
+                "Importance": "High"
+              },
+              "path": "/v2/Mail"
+            }
+          },
+          "Blocked_Response": {
+            "runAfter": {
+              "Email_Security_Alert": [
+                "Succeeded",
+                "Failed"
+              ]
+            },
+            "type": "Response",
+            "kind": "Http",
+            "inputs": {
+              "statusCode": 400,
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Safety-Severity": "@{outputs('Get_Max_Severity')}"
+              },
+              "body": {
+                "status": "blocked",
+                "code": "CONTENT_POLICY_VIOLATION",
+                "message": "Solicitud bloqueada por politicas de contenido empresarial.",
+                "safety_severity": "@{outputs('Get_Max_Severity')}"
+              }
+            }
+          }
+        },
+        "else": {
+          "actions": {
+            "Router": {
+              "runAfter": {},
+              "type": "Switch",
+              "expression": "@coalesce(triggerBody()?['preferred_model'], triggerBody()?['task_type'], 'auto')",
+              "description": "DEMO STEP 2: Router — task_type decide el modelo, preferred_model lo overridea",
+              "cases": {
+                "case_gpt4o": {
+                  "case": "gpt4o",
+                  "actions": {
+                    "Set_GPT4o": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "gpt4o"
+                      }
+                    }
+                  }
+                },
+                "case_claude": {
+                  "case": "claude",
+                  "actions": {
+                    "Set_Claude": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "claude"
+                      }
+                    }
+                  }
+                },
+                "case_gemini": {
+                  "case": "gemini",
+                  "actions": {
+                    "Set_Gemini": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "gemini"
+                      }
+                    }
+                  }
+                },
+                "case_analysis": {
+                  "case": "analysis",
+                  "actions": {
+                    "Set_GPT4o_Analysis": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "gpt4o"
+                      }
+                    }
+                  }
+                },
+                "case_code": {
+                  "case": "code",
+                  "actions": {
+                    "Set_Claude_Code": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "claude"
+                      }
+                    }
+                  }
+                },
+                "case_document": {
+                  "case": "document",
+                  "actions": {
+                    "Set_Claude_Doc": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "claude"
+                      }
+                    }
+                  }
+                },
+                "case_simple": {
+                  "case": "simple",
+                  "actions": {
+                    "Set_Gemini_Simple": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "selected_model",
+                        "value": "gemini"
+                      }
+                    }
+                  }
+                }
+              },
+              "default": {
+                "actions": {
+                  "Set_Default": {
+                    "type": "SetVariable",
+                    "inputs": {
+                      "name": "selected_model",
+                      "value": "gpt4o"
+                    }
+                  }
+                }
+              }
+            },
+            "Executor": {
+              "runAfter": {
+                "Router": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Switch",
+              "expression": "@variables('selected_model')",
+              "description": "DEMO STEP 3: Executor — llama al modelo seleccionado",
+              "cases": {
+                "exec_gpt4o": {
+                  "case": "gpt4o",
+                  "actions": {
+                    "GPT4o_Call": {
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "@parameters('OpenAIEndpoint')",
+                        "method": "POST",
+                        "headers": {
+                          "api-key": "@parameters('OpenAIKey')",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "messages": [
+                            {
+                              "role": "system",
+                              "content": "@{coalesce(triggerBody()?['system_context'], 'Eres un asistente experto en analisis.')}"
+                            },
+                            {
+                              "role": "user",
+                              "content": "@{triggerBody()?['prompt']}"
+                            }
+                          ],
+                          "max_tokens": 1500,
+                          "temperature": 0.5
+                        }
+                      },
+                      "description": "GPT-4o via Azure OpenAI"
+                    },
+                    "Cost_GPT4o": {
+                      "runAfter": {
+                        "GPT4o_Call": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "estimated_cost_usd",
+                        "value": "@mul(body('GPT4o_Call')?['usage']?['total_tokens'], 0.000015)"
+                      }
+                    },
+                    "Result_GPT4o": {
+                      "runAfter": {
+                        "Cost_GPT4o": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Compose",
+                      "inputs": {
+                        "model": "YOUR_DEPLOYMENT_NAME",
+                        "provider": "Azure OpenAI",
+                        "response": "@{body('GPT4o_Call')?['choices'][0]?['message']?['content']}",
+                        "tokens": "@body('GPT4o_Call')?['usage']?['total_tokens']",
+                        "cost_usd": "@variables('estimated_cost_usd')"
+                      }
+                    }
+                  }
+                },
+                "exec_claude": {
+                  "case": "claude",
+                  "actions": {
+                    "Claude_Call": {
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "https://api.anthropic.com/v1/messages",
+                        "method": "POST",
+                        "headers": {
+                          "x-api-key": "@parameters('ClaudeAPIKey')",
+                          "anthropic-version": "2023-06-01",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "model": "claude-sonnet-4-5",
+                          "max_tokens": 2000,
+                          "system": "@{coalesce(triggerBody()?['system_context'], 'Eres un asistente experto en analisis de documentos y codigo.')}",
+                          "messages": [
+                            {
+                              "role": "user",
+                              "content": "@{triggerBody()?['prompt']}"
+                            }
+                          ]
+                        }
+                      },
+                      "description": "Claude via API directa Anthropic — obtener key en console.anthropic.com"
+                    },
+                    "Cost_Claude": {
+                      "runAfter": {
+                        "Claude_Call": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "estimated_cost_usd",
+                        "value": "@mul(add(body('Claude_Call')?['usage']?['input_tokens'], body('Claude_Call')?['usage']?['output_tokens']), 0.000015)"
+                      }
+                    },
+                    "Result_Claude": {
+                      "runAfter": {
+                        "Cost_Claude": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Compose",
+                      "inputs": {
+                        "model": "claude-sonnet-4-5",
+                        "provider": "Anthropic",
+                        "response": "@{body('Claude_Call')?['content'][0]?['text']}",
+                        "tokens": "@add(body('Claude_Call')?['usage']?['input_tokens'], body('Claude_Call')?['usage']?['output_tokens'])",
+                        "cost_usd": "@variables('estimated_cost_usd')"
+                      }
+                    }
+                  }
+                },
+                "exec_gemini": {
+                  "case": "gemini",
+                  "actions": {
+                    "Gemini_Call": {
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "@concat('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=', parameters('GeminiAPIKey'))",
+                        "method": "POST",
+                        "headers": {
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "contents": [
+                            {
+                              "parts": [
+                                {
+                                  "text": "@{triggerBody()?['prompt']}"
+                                }
+                              ]
+                            }
+                          ],
+                          "generationConfig": {
+                            "maxOutputTokens": 1000,
+                            "temperature": 0.7
+                          }
+                        }
+                      },
+                      "description": "Gemini 2.0 Flash via Google AI — obtener key en aistudio.google.com"
+                    },
+                    "Cost_Gemini": {
+                      "runAfter": {
+                        "Gemini_Call": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "estimated_cost_usd",
+                        "value": "@mul(body('Gemini_Call')?['usageMetadata']?['totalTokenCount'], 0.0000005)"
+                      }
+                    },
+                    "Result_Gemini": {
+                      "runAfter": {
+                        "Cost_Gemini": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Compose",
+                      "inputs": {
+                        "model": "gemini-2.0-flash",
+                        "provider": "Google",
+                        "response": "@{body('Gemini_Call')?['candidates'][0]?['content']?['parts'][0]?['text']}",
+                        "tokens": "@body('Gemini_Call')?['usageMetadata']?['totalTokenCount']",
+                        "cost_usd": "@variables('estimated_cost_usd')"
+                      }
+                    }
+                  }
+                }
+              },
+              "default": {
+                "actions": {}
+              }
+            },
+            "Resolve_Output": {
+              "runAfter": {
+                "Executor": [
+                  "Succeeded",
+                  "Failed"
+                ]
+              },
+              "type": "Compose",
+              "inputs": "@coalesce(outputs('Result_GPT4o'), outputs('Result_Claude'), outputs('Result_Gemini'))"
+            },
+            "Budget_Check": {
+              "runAfter": {
+                "Resolve_Output": [
+                  "Succeeded"
+                ]
+              },
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "greaterOrEquals": [
+                      "@variables('estimated_cost_usd')",
+                      0.1
+                    ]
+                  }
+                ]
+              },
+              "description": "DEMO STEP 4: Cost governance — alerta si costo > $0.10 USD por request",
+              "actions": {
+                "Budget_Alert_Email": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['outlook']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": {
+                      "To": "YOUR_ADMIN_EMAIL@domain.com",
+                      "Subject": "[AI-COST] Llamada costosa — @{variables('estimated_cost_usd')} USD",
+                      "Body": "<p><strong>Alerta de costo AI</strong></p><p><strong>Modelo:</strong> @{outputs('Resolve_Output')?['model']}</p><p><strong>Costo:</strong> @{variables('estimated_cost_usd')} USD</p><p><strong>Tokens:</strong> @{outputs('Resolve_Output')?['tokens']}</p>",
+                      "Importance": "Normal"
+                    },
+                    "path": "/v2/Mail"
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              }
+            },
+            "Final_Response": {
+              "runAfter": {
+                "Budget_Check": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Response",
+              "kind": "Http",
+              "inputs": {
+                "statusCode": 200,
+                "headers": {
+                  "Content-Type": "application/json",
+                  "X-Model-Used": "@{outputs('Resolve_Output')?['model']}",
+                  "X-Safety-Severity": "@{outputs('Get_Max_Severity')}",
+                  "X-Cost-USD": "@{outputs('Resolve_Output')?['cost_usd']}"
+                },
+                "body": {
+                  "status": "success",
+                  "model_used": "@{outputs('Resolve_Output')?['model']}",
+                  "provider": "@{outputs('Resolve_Output')?['provider']}",
+                  "task_type": "@{coalesce(triggerBody()?['task_type'], 'auto')}",
+                  "response": "@{outputs('Resolve_Output')?['response']}",
+                  "governance": {
+                    "safety_check": "passed",
+                    "safety_severity": "@{outputs('Get_Max_Severity')}",
+                    "tokens_used": "@{outputs('Resolve_Output')?['tokens']}",
+                    "estimated_cost_usd": "@{outputs('Resolve_Output')?['cost_usd']}",
+                    "routing_reason": "@{coalesce(triggerBody()?['preferred_model'], triggerBody()?['task_type'], 'auto-default')}"
+                  },
+                  "timestamp": "@utcNow()"
+                }
+              },
+              "description": "DEMO STEP 5: Response con metadata completa de governance"
+            }
+          }
+        }
+      }
+    },
+    "outputs": {},
+    "parameters": {
+      "ContentSafetyEndpoint": {
+        "type": "String"
+      },
+      "ContentSafetyKey": {
+        "type": "String"
+      },
+      "OpenAIKey": {
+        "type": "String"
+      },
+      "OpenAIEndpoint": {
+        "type": "String"
+      },
+      "ClaudeAPIKey": {
+        "type": "String"
+      },
+      "GeminiAPIKey": {
+        "type": "String"
+      },
+      "$connections": {
+        "type": "Object",
+        "defaultValue": {}
+      }
+    }
+  },
+  "parameters": {
+    "ContentSafetyEndpoint": {
+      "value": "https://YOUR-CONTENT-SAFETY-RESOURCE.cognitiveservices.azure.com"
+    },
+    "ContentSafetyKey": {
+      "value": "YOUR_CONTENT_SAFETY_KEY"
+    },
+    "OpenAIKey": {
+      "value": "YOUR_AZURE_OPENAI_KEY"
+    },
+    "OpenAIEndpoint": {
+      "value": "https://YOUR-AOAI-RESOURCE.cognitiveservices.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2025-01-01-preview"
+    },
+    "ClaudeAPIKey": {
+      "value": "YOUR_CLAUDE_API_KEY"
+    },
+    "GeminiAPIKey": {
+      "value": "YOUR_GEMINI_API_KEY"
+    },
+    "$connections": {
+      "value": {
+        "outlook": {
+          "id": "/subscriptions/YOUR_SUBSCRIPTION_ID/providers/Microsoft.Web/locations/YOUR_REGION/managedApis/outlook",
+          "connectionId": "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/YOUR_RESOURCE_GROUP/providers/Microsoft.Web/connections/outlook",
+          "connectionName": "outlook",
+          "connectionProperties": {}
+        }
+      }
+    }
+  }
+}

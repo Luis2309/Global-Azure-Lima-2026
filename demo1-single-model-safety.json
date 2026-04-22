@@ -1,0 +1,318 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "metadata": {
+          "operationMetadataId": "demo1-trigger"
+        },
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string",
+                "description": "El prompt del usuario final"
+              },
+              "system_context": {
+                "type": "string",
+                "description": "Instruccion de sistema opcional"
+              },
+              "user_id": {
+                "type": "string",
+                "description": "ID del usuario para auditoria"
+              }
+            },
+            "required": [
+              "prompt"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Log_Request_Received": {
+        "runAfter": {},
+        "type": "Compose",
+        "inputs": {
+          "timestamp": "@utcNow()",
+          "user_id": "@{coalesce(triggerBody()?['user_id'], 'anonymous')}",
+          "prompt_length": "@{length(triggerBody()?['prompt'])}",
+          "flow": "demo1-single-model-safety"
+        },
+        "description": "Auditoria: registra entrada del request"
+      },
+      "Content_Safety_PreCheck": {
+        "runAfter": {
+          "Log_Request_Received": [
+            "Succeeded"
+          ]
+        },
+        "type": "Http",
+        "inputs": {
+          "uri": "@{parameters('ContentSafetyEndpoint')}/contentsafety/text:analyze?api-version=2023-10-01",
+          "method": "POST",
+          "headers": {
+            "Ocp-Apim-Subscription-Key": "@parameters('ContentSafetyKey')",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@{triggerBody()?['prompt']}",
+            "categories": [
+              "Hate",
+              "SelfHarm",
+              "Sexual",
+              "Violence"
+            ],
+            "outputType": "FourSeverityLevels"
+          }
+        },
+        "description": "DEMO STEP 1: Prompt a Azure AI Content Safety antes de tocar cualquier LLM"
+      },
+      "Parse_Safety_Response": {
+        "runAfter": {
+          "Content_Safety_PreCheck": [
+            "Succeeded"
+          ]
+        },
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@body('Content_Safety_PreCheck')",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "categoriesAnalysis": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Calculate_Max_Severity": {
+        "runAfter": {
+          "Parse_Safety_Response": [
+            "Succeeded"
+          ]
+        },
+        "type": "Compose",
+        "inputs": "@max(body('Parse_Safety_Response')?['categoriesAnalysis'][0]?['severity'], body('Parse_Safety_Response')?['categoriesAnalysis'][1]?['severity'], body('Parse_Safety_Response')?['categoriesAnalysis'][2]?['severity'], body('Parse_Safety_Response')?['categoriesAnalysis'][3]?['severity'])",
+        "description": "Severity maximo entre todas las categorias (0-6)"
+      },
+      "Safety_Gate": {
+        "runAfter": {
+          "Calculate_Max_Severity": [
+            "Succeeded"
+          ]
+        },
+        "type": "If",
+        "expression": {
+          "and": [
+            {
+              "greaterOrEquals": [
+                "@outputs('Calculate_Max_Severity')",
+                4
+              ]
+            }
+          ]
+        },
+        "description": "DEMO STEP 3: Safety Gate — severity < 4 pasa, >= 4 se bloquea",
+        "actions": {
+          "Log_Blocked_Request": {
+            "runAfter": {},
+            "type": "Compose",
+            "inputs": {
+              "blocked": true,
+              "reason": "Content Safety severity >= 4",
+              "severity": "@outputs('Calculate_Max_Severity')",
+              "user_id": "@{coalesce(triggerBody()?['user_id'], 'anonymous')}",
+              "timestamp": "@utcNow()",
+              "categories_detail": "@body('Parse_Safety_Response')?['categoriesAnalysis']"
+            }
+          },
+          "Notify_Security_Team": {
+            "runAfter": {
+              "Log_Blocked_Request": [
+                "Succeeded"
+              ]
+            },
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['outlook']['connectionId']"
+                }
+              },
+              "method": "post",
+              "body": {
+                "To": "YOUR_SECURITY_EMAIL@domain.com",
+                "Subject": "[AI-GOVERNANCE] Prompt bloqueado — severity @{outputs('Calculate_Max_Severity')}",
+                "Body": "<p><strong>Alerta AI Governance</strong></p><p><strong>Severity:</strong> @{outputs('Calculate_Max_Severity')}/6</p><p><strong>Usuario:</strong> @{coalesce(triggerBody()?['user_id'], 'anonymous')}</p><p><strong>Timestamp:</strong> @{utcNow()}</p><p><strong>Categorias:</strong> @{string(body('Parse_Safety_Response')?['categoriesAnalysis'])}</p>",
+                "Importance": "High"
+              },
+              "path": "/v2/Mail"
+            },
+            "description": "Email de alerta al equipo de seguridad — configurar YOUR_SECURITY_EMAIL"
+          },
+          "Return_Blocked_Response": {
+            "runAfter": {
+              "Notify_Security_Team": [
+                "Succeeded",
+                "Failed"
+              ]
+            },
+            "type": "Response",
+            "kind": "Http",
+            "inputs": {
+              "statusCode": 400,
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Safety-Severity": "@{outputs('Calculate_Max_Severity')}"
+              },
+              "body": {
+                "status": "blocked",
+                "message": "Tu solicitud no cumple las politicas de contenido.",
+                "request_id": "@{utcNow()}",
+                "code": "CONTENT_POLICY_VIOLATION"
+              }
+            }
+          }
+        },
+        "else": {
+          "actions": {
+            "Call_GPT4o": {
+              "runAfter": {},
+              "type": "Http",
+              "inputs": {
+                "uri": "@parameters('OpenAIEndpoint')",
+                "method": "POST",
+                "headers": {
+                  "api-key": "@parameters('OpenAIKey')",
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": "@{coalesce(triggerBody()?['system_context'], 'Eres un asistente util y profesional.')}"
+                    },
+                    {
+                      "role": "user",
+                      "content": "@{triggerBody()?['prompt']}"
+                    }
+                  ],
+                  "max_tokens": 1000,
+                  "temperature": 0.7
+                }
+              },
+              "description": "DEMO STEP 2: Prompt aprobado por Safety → GPT-4o"
+            },
+            "Log_Token_Usage": {
+              "runAfter": {
+                "Call_GPT4o": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Compose",
+              "inputs": {
+                "model": "YOUR_DEPLOYMENT_NAME",
+                "prompt_tokens": "@body('Call_GPT4o')?['usage']?['prompt_tokens']",
+                "completion_tokens": "@body('Call_GPT4o')?['usage']?['completion_tokens']",
+                "total_tokens": "@body('Call_GPT4o')?['usage']?['total_tokens']",
+                "estimated_cost_usd": "@mul(body('Call_GPT4o')?['usage']?['total_tokens'], 0.000015)",
+                "user_id": "@{coalesce(triggerBody()?['user_id'], 'anonymous')}",
+                "timestamp": "@utcNow()"
+              },
+              "description": "Cost tracking por llamada"
+            },
+            "Return_Success_Response": {
+              "runAfter": {
+                "Log_Token_Usage": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Response",
+              "kind": "Http",
+              "inputs": {
+                "statusCode": 200,
+                "headers": {
+                  "Content-Type": "application/json",
+                  "X-Safety-Severity": "@{outputs('Calculate_Max_Severity')}",
+                  "X-Model-Used": "YOUR_DEPLOYMENT_NAME"
+                },
+                "body": {
+                  "status": "success",
+                  "model_used": "YOUR_DEPLOYMENT_NAME",
+                  "response": "@{body('Call_GPT4o')?['choices'][0]?['message']?['content']}",
+                  "safety_check": "passed",
+                  "usage": {
+                    "prompt_tokens": "@{body('Call_GPT4o')?['usage']?['prompt_tokens']}",
+                    "completion_tokens": "@{body('Call_GPT4o')?['usage']?['completion_tokens']}",
+                    "total_tokens": "@{body('Call_GPT4o')?['usage']?['total_tokens']}",
+                    "estimated_cost_usd": "@{outputs('Log_Token_Usage')?['estimated_cost_usd']}"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "outputs": {},
+    "parameters": {
+      "ContentSafetyEndpoint": {
+        "type": "String"
+      },
+      "ContentSafetyKey": {
+        "type": "String"
+      },
+      "OpenAIKey": {
+        "type": "String"
+      },
+      "OpenAIEndpoint": {
+        "type": "String"
+      },
+      "$connections": {
+        "type": "Object",
+        "defaultValue": {}
+      }
+    }
+  },
+  "parameters": {
+    "ContentSafetyEndpoint": {
+      "value": "https://YOUR-CONTENT-SAFETY-RESOURCE.cognitiveservices.azure.com"
+    },
+    "ContentSafetyKey": {
+      "value": "YOUR_CONTENT_SAFETY_KEY"
+    },
+    "OpenAIKey": {
+      "value": "YOUR_AZURE_OPENAI_KEY"
+    },
+    "OpenAIEndpoint": {
+      "value": "https://YOUR-AOAI-RESOURCE.cognitiveservices.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2025-01-01-preview"
+    },
+    "$connections": {
+      "value": {
+        "outlook": {
+          "id": "/subscriptions/YOUR_SUBSCRIPTION_ID/providers/Microsoft.Web/locations/YOUR_REGION/managedApis/outlook",
+          "connectionId": "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/YOUR_RESOURCE_GROUP/providers/Microsoft.Web/connections/outlook",
+          "connectionName": "outlook",
+          "connectionProperties": {}
+        }
+      }
+    }
+  }
+}

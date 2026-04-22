@@ -9,7 +9,7 @@
 
 Este repositorio contiene los recursos, flujos y documentación de la charla presentada en **Global Azure Lima 2026**, donde exploramos cómo evolucionar desde integraciones tradicionales con Logic Apps hacia arquitecturas modernas basadas en agentes con MCP (Model Context Protocol), aplicando AI Governance real en cada paso.
 
-La demo utiliza un caso de uso real de la industria aseguradora peruana: **comparación automatizada de Slip de Colocación vs Póliza emitida**, con detección de discrepancias usando IA generativa y una capa de governance que protege el pipeline completo.
+La demo utiliza un caso de uso real de la industria aseguradora peruana: **comparación automatizada de Formato de Colocación vs Documento emitido**, con detección de discrepancias usando IA generativa y una capa de governance que protege el pipeline completo.
 
 ---
 
@@ -64,13 +64,13 @@ POST {endpoint}/contentsafety/text:shieldPrompt?api-version=2024-09-01
 }
 ```
 
-**Caso real demostrado:** Un PDF de póliza de seguros con instrucciones maliciosas en texto gris (invisible visualmente, pero legible por Document Intelligence OCR) que intentan manipular al LLM para aprobar siniestros sin revisión.
+**Caso real demostrado:** Un PDF de Documento de seguros con instrucciones maliciosas en texto gris (invisible visualmente, pero legible por Document Intelligence OCR) que intentan manipular al LLM para aprobar siniestros sin revisión.
 
 ---
 
 ### Azure Document Intelligence
 
-Servicio de OCR avanzado que extrae texto estructurado de PDFs, Word y otros formatos. En los flujos de esta demo usa el modelo `prebuilt-read` para extraer el contenido de Slip y Póliza antes de enviarlo al LLM.
+Servicio de OCR avanzado que extrae texto estructurado de PDFs, Word y otros formatos. En los flujos de esta demo usa el modelo `prebuilt-read` para extraer el contenido de Formato y Documento antes de enviarlo al LLM.
 
 **Flujo de uso:**
 1. `POST` al endpoint de análisis → recibe `operation-location` en headers
@@ -86,7 +86,7 @@ Servicio de OCR avanzado que extrae texto estructurado de PDFs, Word y otros for
 **Patrón de governance en el flujo:**
 ```
 SharePoint trigger
-  └─ Get PDF Documento + Slip
+  └─ Get PDF Documento + Formato
       └─ Document Intelligence OCR x2
           └─ Prompt Shields (detecta injection)
               └─ Content Safety (detecta hate/violence/etc)
@@ -130,7 +130,7 @@ Cada workflow con trigger `McpTool` se convierte en una herramienta invocable po
 get_Documento(Documento_id)       → SharePoint → PDF
 extract_text(pdf_base64)    → Document Intelligence → texto
 safety_check(text)          → Content Safety + Prompt Shields → { passed, severity }
-compare_docs(slip, Documento)  → GPT-4o → discrepancias en HTML
+compare_docs(Formato, Documento)  → GPT-4o → discrepancias en HTML
 ```
 
 **El agente decide el orden en runtime** — no hay `if` hardcodeado en el designer. Si `safety_check` retorna `attackDetected: true`, el agente no llama a `compare_docs`. Esa decisión la toma el agente, no el código.
@@ -147,7 +147,7 @@ Orquestador inteligente que razona sobre qué tools MCP invocar. Recibe lenguaje
 |---|---|---|
 | Trigger | SharePoint cada 3 min | Lenguaje natural del analista |
 | Orden de pasos | Hardcodeado en el designer | El agente decide en runtime |
-| Input | Item en lista SharePoint | "Compara la póliza 2024-001" |
+| Input | Item en lista SharePoint | "Compara la Documento 2024-001" |
 | Memoria | Ninguna | Contexto entre sesiones |
 | Governance | Content Safety en el flujo | Content Safety como tool del agente |
 
@@ -240,7 +240,7 @@ AKS Cluster
 ├── flows/
 │   ├── demo1-single-model-safety/    ← Logic App: Content Safety + GPT-4o
 │   ├── demo2-multimodel-router/      ← Logic App: routing GPT + Claude + Gemini
-│   ├── Documentos-con-content-safety/   ← Logic App: flujo real de pólizas con governance
+│   ├── Documentos-con-content-safety/   ← Logic App: flujo real de Documentos con governance
 │   └── mcp-server/                   ← Logic Apps Standard: 4 tools MCP
 ├── docs/
 │   ├── architecture/                 ← diagramas C4 de la arquitectura

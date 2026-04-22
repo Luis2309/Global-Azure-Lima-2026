@@ -86,7 +86,7 @@ Servicio de OCR avanzado que extrae texto estructurado de PDFs, Word y otros for
 **Patrón de governance en el flujo:**
 ```
 SharePoint trigger
-  └─ Get PDF Poliza + Slip
+  └─ Get PDF Documento + Slip
       └─ Document Intelligence OCR x2
           └─ Prompt Shields (detecta injection)
               └─ Content Safety (detecta hate/violence/etc)
@@ -127,10 +127,10 @@ Protocolo abierto creado por Anthropic y adoptado por Microsoft, Google y el eco
 Cada workflow con trigger `McpTool` se convierte en una herramienta invocable por el agente de AI Foundry.
 
 ```
-get_poliza(poliza_id)       → SharePoint → PDF
+get_Documento(Documento_id)       → SharePoint → PDF
 extract_text(pdf_base64)    → Document Intelligence → texto
 safety_check(text)          → Content Safety + Prompt Shields → { passed, severity }
-compare_docs(slip, poliza)  → GPT-4o → discrepancias en HTML
+compare_docs(slip, Documento)  → GPT-4o → discrepancias en HTML
 ```
 
 **El agente decide el orden en runtime** — no hay `if` hardcodeado en el designer. Si `safety_check` retorna `attackDetected: true`, el agente no llama a `compare_docs`. Esa decisión la toma el agente, no el código.
@@ -179,7 +179,7 @@ Analista (lenguaje natural) → Foundry Agent
                                     ↓
                               MCP Server (Logic Apps Standard)
                          ┌────┬──────────┬────────────┐
-                    get_poliza  extract_text  safety_check  compare_docs
+                    get_Documento  extract_text  safety_check  compare_docs
                          └────┴──────────┴────────────┘
                               Agente razona y responde
 ```
@@ -240,7 +240,7 @@ AKS Cluster
 ├── flows/
 │   ├── demo1-single-model-safety/    ← Logic App: Content Safety + GPT-4o
 │   ├── demo2-multimodel-router/      ← Logic App: routing GPT + Claude + Gemini
-│   ├── polizas-con-content-safety/   ← Logic App: flujo real de pólizas con governance
+│   ├── Documentos-con-content-safety/   ← Logic App: flujo real de pólizas con governance
 │   └── mcp-server/                   ← Logic Apps Standard: 4 tools MCP
 ├── docs/
 │   ├── architecture/                 ← diagramas C4 de la arquitectura
